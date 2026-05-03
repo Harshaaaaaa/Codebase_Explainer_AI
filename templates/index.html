@@ -2,8 +2,6 @@
 <html>
 <head>
     <title>AI Codebase Analyzer</title>
-
-    <!-- Bootstrap -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 
@@ -13,7 +11,6 @@
 
     <h1 class="text-center mb-4">AI Codebase Analyzer</h1>
 
-    <!-- Input -->
     <form method="POST" class="mb-4">
         <div class="input-group">
             <input type="text" name="repo" class="form-control" placeholder="Enter GitHub repo URL" required>
@@ -22,8 +19,7 @@
     </form>
 
     {% if summary %}
-    <!-- Summary -->
-    <h2>Project Summary</h2>
+    <h2>🧠 Project Summary</h2>
     <div class="card mb-4 shadow-sm">
         <div class="card-body">
             <ul>
@@ -37,22 +33,20 @@
 
     {% if results %}
 
-    <!-- Files -->
     <h2 class="mb-3">📂 File Explanations</h2>
 
     {% for r in results %}
         <div class="card mb-3 shadow-sm">
             <div class="card-body">
-                <h5>{{ r.file }}</h5>
+                <h5>📄 {{ r.file }}</h5>
                 <pre class="bg-dark text-light p-3 rounded">{{ r.explanation }}</pre>
             </div>
         </div>
     {% endfor %}
 
-    <!-- Q&A -->
     <div class="card mt-4 shadow-sm">
         <div class="card-body">
-            <h4>Ask Questions</h4>
+            <h4>💬 Ask Questions</h4>
 
             <div class="input-group mb-3">
                 <input type="text" id="q" class="form-control" placeholder="Ask something about the repo...">
