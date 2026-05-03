@@ -31,4 +31,6 @@ It fetches repository files using the GitHub API and uses an AI model to:
 
 ```bash
 git clone https://github.com/your-username/Codebase_Explainer_AI.git
+
+```bash
 cd Codebase_Explainer_AI
