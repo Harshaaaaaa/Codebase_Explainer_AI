@@ -2,3 +2,5 @@ flask
 requests
 groq
 gunicorn
+sentence-transformers
+numpy
