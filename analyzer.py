@@ -1,167 +1,300 @@
-import requests
-import json
 import os
+import json
+import requests
 import numpy as np
 from groq import Groq
 from sentence_transformers import SentenceTransformer
 
-# ================== SETUP ==================
+# ================== CONFIG ==================
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+api_key = os.getenv("GROQ_API_KEY")
+
+if not api_key:
+    raise ValueError(
+        "GROQ_API_KEY not found. Set it in terminal using:\n"
+        '$env:GROQ_API_KEY="your_key_here"'
+    )
+
+client = Groq(api_key=api_key)
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-valid_extensions = (".py", ".ipynb", ".md")
+valid_extensions = (".py", ".ipynb", ".md", ".js", ".java", ".cpp")
+VECTOR_STORE = []
 
-# GLOBAL STORE (important)
-VECTOR_STORE = []   # [{chunk, embedding, file}]
 
-# ================== AI ==================
+# ================== LLM ==================
 
 def ask_llm(prompt):
     try:
-        res = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}]
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert codebase analyst. Be accurate, concise, and do not guess."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.2
         )
-        return res.choices[0].message.content
+        return response.choices[0].message.content
+
     except Exception as e:
         return f"AI Error: {e}"
 
-# ================== CHUNKING ==================
 
-def smart_chunk(text, size=400):
-    lines = text.split("\n")
+# ================== FILE HANDLING ==================
+
+def extract_ipynb_code(raw):
+    try:
+        notebook = json.loads(raw)
+        code_cells = []
+
+        for cell in notebook.get("cells", []):
+            if cell.get("cell_type") == "code":
+                source = "".join(cell.get("source", []))
+                code_cells.append(source)
+
+        return "\n\n".join(code_cells)
+
+    except Exception:
+        return raw
+
+
+def is_valid_file(filename):
+    ignored = (
+        "license",
+        "code_of_conduct",
+        "contributing",
+        "pull_request_template",
+        "issue_template"
+    )
+
+    lower_name = filename.lower()
+
+    if any(word in lower_name for word in ignored):
+        return False
+
+    return lower_name.endswith(valid_extensions)
+
+
+def chunk_text(text, size=600, overlap=120):
     chunks = []
-    current = ""
+    start = 0
 
-    for line in lines:
-        if len(current) + len(line) < size:
-            current += line + "\n"
-        else:
-            chunks.append(current)
-            current = line + "\n"
-
-    if current:
-        chunks.append(current)
+    while start < len(text):
+        end = start + size
+        chunks.append(text[start:end])
+        start += size - overlap
 
     return chunks
+
 
 # ================== EMBEDDINGS ==================
 
 def cosine_similarity(a, b):
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    denominator = np.linalg.norm(a) * np.linalg.norm(b)
+
+    if denominator == 0:
+        return 0
+
+    return np.dot(a, b) / denominator
+
 
 def build_vector_store(results):
     global VECTOR_STORE
     VECTOR_STORE = []
 
-    for r in results:
-        chunks = smart_chunk(r["content"])
+    for result in results:
+        chunks = chunk_text(result["content"])
+
+        if not chunks:
+            continue
 
         embeddings = embedder.encode(chunks)
 
-        for i in range(len(chunks)):
+        for chunk, embedding in zip(chunks, embeddings):
             VECTOR_STORE.append({
-                "chunk": chunks[i],
-                "embedding": embeddings[i],
-                "file": r["file"]
+                "file": result["file"],
+                "chunk": chunk,
+                "embedding": embedding
             })
 
-def retrieve(question, top_k=4):
-    q_emb = embedder.encode([question])[0]
 
-    scored = []
+def retrieve_relevant_chunks(question, top_k=5):
+    if not VECTOR_STORE:
+        return []
+
+    question_lower = question.lower()
+    question_embedding = embedder.encode([question])[0]
+
+    scored_chunks = []
 
     for item in VECTOR_STORE:
-        score = cosine_similarity(q_emb, item["embedding"])
+        score = cosine_similarity(question_embedding, item["embedding"])
 
-        # slight boost for important files
-        if "readme" in item["file"].lower():
+        text = item["chunk"].lower()
+        file = item["file"].lower()
+
+        # 🔥 Keyword boost
+        keywords = ["model", "train", "predict", "fit", "classifier", "regression"]
+
+        if any(k in text for k in keywords):
+            score += 0.15
+
+        if any(k in question_lower for k in keywords) and any(k in text for k in keywords):
+            score += 0.25
+
+        # File priority
+        if file.endswith(".ipynb"):
             score += 0.1
-        if item["file"].endswith(".ipynb"):
-            score += 0.05
 
-        scored.append((score, item))
+        scored_chunks.append((score, item))
 
-    scored.sort(reverse=True)
+    scored_chunks.sort(key=lambda x: x[0], reverse=True)
 
-    return [x[1] for x in scored[:top_k]]
+    return [item for score, item in scored_chunks[:top_k]]
 
-# ================== EXPLAIN ==================
 
-def explain_code(code, filename):
-    return ask_llm(f"""
-Explain this file:
+# ================== AI FEATURES ==================
 
-File: {filename}
+def explain_file(content, filename):
+    prompt = f"""
+Explain this file clearly and briefly.
 
-- Purpose
-- Key logic
+File name: {filename}
 
-Keep it short.
+Return in this format:
 
-Code:
-{code[:1200]}
-""")
+Purpose:
+Key logic:
+Technologies used:
 
-# ================== SUMMARY ==================
+File content:
+{content[:1800]}
+"""
+    return ask_llm(prompt)
+
 
 def get_summary(results):
     context = ""
-    for r in results:
-        context += f"\nFILE: {r['file']}\n{r['content']}\n"
 
-    return ask_llm(f"""
-Summarize this project:
+    for result in results:
+        context += f"\nFILE: {result['file']}\n{result['content'][:1000]}\n"
 
-- One-line description
-- 3 features
-- Tech stack
+    prompt = f"""
+Summarize this codebase in a short, useful format.
 
-Keep under 6 lines.
+Return only:
 
-{context[:3000]}
-""")
+One-line description:
+Key features:
+Tech stack:
+Main purpose:
 
-# ================== Q&A (OPTIMIZED) ==================
+Codebase context:
+{context[:4500]}
+"""
+    return ask_llm(prompt)
+
 
 def ask_question(question):
-    retrieved = retrieve(question)
+    relevant_chunks = retrieve_relevant_chunks(question)
+
+    if not relevant_chunks:
+        return "Please analyze a repository first."
 
     context = ""
-    for item in retrieved:
+
+    for item in relevant_chunks:
         context += f"\nFILE: {item['file']}\n{item['chunk']}\n"
 
-    return ask_llm(f"""
-You are an expert code analyst.
+    prompt = f"""
+You are an expert software engineer analyzing a codebase.
 
-Answer ONLY from context.
+Answer the question using ONLY the provided context.
+
+================ RULES ================
+
+1. Grounded Answers
+- Do NOT guess.
+- If information is missing, say: "Not found in analyzed files".
+
+2. Precision
+- Identify exact names (functions, classes, models, APIs, variables).
+- Quote code snippets when helpful.
+
+3. Relevance
+- Ignore unrelated content.
+- Focus only on parts relevant to the question.
+
+4. Role Understanding
+- Identify the ROLE of each component:
+  • Core logic (main functionality)
+  • Supporting logic (helpers, preprocessing, utilities)
+  • External tools (libraries, APIs)
+
+5. Importance Ranking
+- Prioritize components that directly answer the question.
+- Supporting tools should be mentioned separately if needed.
+
+6. File Awareness
+- Mention file names where information is found.
+
+7. Clarity
+- Keep answer structured and concise.
+- Use bullet points when needed.
+
+Structure your answer as:
+
+Primary Answer:
+Supporting Details:
+Not Relevant / Supporting Components:
+=====================================
 
 Context:
 {context}
 
-Question: {question}
+Question:
+{question}
 
-Answer clearly:
-""")
+Answer:
+"""
+    return ask_llm(prompt)
+
 
 # ================== GITHUB ==================
 
 def analyze_repo(repo_url):
     parts = repo_url.strip().rstrip("/").split("/")
-    owner, repo = parts[-2], parts[-1]
+
+    if len(parts) < 5:
+        raise ValueError("Invalid GitHub repo URL")
+
+    owner = parts[-2]
+    repo = parts[-1]
 
     api_url = f"https://api.github.com/repos/{owner}/{repo}/contents"
 
     results = []
-    state = {"count": 0, "limit": 6}
+    state = {
+        "count": 0,
+        "limit": 8
+    }
 
-    def fetch(api):
+    def fetch_files(url):
         if state["count"] >= state["limit"]:
             return
 
-        res = requests.get(api)
-        data = res.json()
+        response = requests.get(url)
+
+        if response.status_code != 200:
+            raise Exception(f"GitHub API Error: {response.status_code}")
+
+        data = response.json()
 
         for item in data:
             if state["count"] >= state["limit"]:
@@ -169,41 +302,34 @@ def analyze_repo(repo_url):
 
             name = item["name"]
 
-            if item["type"] == "file" and item["download_url"]:
-                if not name.endswith(valid_extensions):
+            if item["type"] == "file" and item.get("download_url"):
+                if not is_valid_file(name):
                     continue
 
                 raw = requests.get(item["download_url"]).text
 
                 if name.endswith(".ipynb"):
-                    try:
-                        notebook = json.loads(raw)
-                        code = "\n".join(
-                            "".join(cell["source"])
-                            for cell in notebook["cells"]
-                            if cell["cell_type"] == "code"
-                        )
-                    except:
-                        code = raw
+                    content = extract_ipynb_code(raw)
                 else:
-                    code = raw
+                    content = raw
 
-                explanation = explain_code(code, name)
+                if not content.strip():
+                    continue
+
+                explanation = explain_file(content, name)
 
                 results.append({
                     "file": name,
-                    "content": code[:2000],
+                    "content": content[:3000],
                     "explanation": explanation
                 })
 
                 state["count"] += 1
 
             elif item["type"] == "dir":
-                fetch(item["url"])
+                fetch_files(item["url"])
 
-    fetch(api_url)
-
-    # 🔥 BUILD VECTOR STORE ONCE
+    fetch_files(api_url)
     build_vector_store(results)
 
     return results
