@@ -2,5 +2,5 @@ flask
 requests
 groq
 gunicorn
-sentence-transformers
+python-dotenv
 numpy
