@@ -3,4 +3,4 @@ requests
 groq
 gunicorn
 python-dotenv
-
+numpy
